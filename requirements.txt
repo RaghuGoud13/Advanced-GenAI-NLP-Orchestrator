@@ -1,0 +1,15 @@
+langchain
+langchain-openai
+langchain-community
+transformers
+peft
+faiss-cpu
+fastapi
+uvicorn
+pydantic
+torch
+bitsandbytes
+accelerate
+datasets
+python-dotenv
+tiktoken
