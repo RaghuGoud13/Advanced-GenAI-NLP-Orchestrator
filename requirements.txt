@@ -13,3 +13,10 @@ accelerate
 datasets
 python-dotenv
 tiktoken
+ragas
+rank_bm25
+pinecone-client
+anthropic
+boto3
+azure-identity
+openai
