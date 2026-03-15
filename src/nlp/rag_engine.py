@@ -1,16 +1,18 @@
 import os
-from typing import List, Optional
+from typing import List, Optional, Union
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from langchain_core.documents import Document
+from src.core.rag.hybrid_retriever import HybridRetriever, VectorRetriever, KeywordRetriever
 
 class RAGEngine:
     """
     Advanced RAG Engine for context-augmented LLM generation.
-    Supports semantic search, FAISS indexing, and modular prompt injection.
+    Supports hybrid search (Vector + Keyword), FAISS indexing, and modular prompt injection.
     """
 
     def __init__(
@@ -26,24 +28,34 @@ class RAGEngine:
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap
         )
+        self.documents: List[Document] = []
         self.vector_store: Optional[FAISS] = None
 
     def ingest_documents(self, texts: List[str]) -> None:
         """
-        Chunks and indexes raw text into the FAISS vector store.
+        Chunks and indexes raw text into the internal document store and FAISS.
         """
-        docs = self.text_splitter.create_documents(texts)
+        new_docs = self.text_splitter.create_documents(texts)
+        self.documents.extend(new_docs)
+        
         if self.vector_store is None:
-            self.vector_store = FAISS.from_documents(docs, self.embeddings)
+            self.vector_store = FAISS.from_documents(new_docs, self.embeddings)
         else:
-            self.vector_store.add_documents(docs)
+            self.vector_store.add_documents(new_docs)
 
-    def _get_retriever(self, k: int = 5):
-        if not self.vector_store:
-            raise ValueError("Vector store not initialized. Ingest documents first.")
-        return self.vector_store.as_retriever(search_kwargs={"k": k})
+    def _get_hybrid_retriever(self, k: int = 5) -> HybridRetriever:
+        """
+        Constructs and returns a HybridRetriever instance.
+        """
+        if not self.documents:
+            raise ValueError("No documents ingested. Ingest documents first.")
+        
+        vector_strategy = VectorRetriever(self.embeddings, self.documents)
+        keyword_strategy = KeywordRetriever(self.documents)
+        
+        return HybridRetriever(vector_strategy, keyword_strategy)
 
-    def query(self, question: str) -> str:
+    def query(self, question: str, use_hybrid: bool = True) -> str:
         """
         Executes a RAG query: Retrieval -> Augmentation -> Generation.
         """
@@ -53,16 +65,26 @@ class RAGEngine:
         Question: {question}
         """
         prompt = ChatPromptTemplate.from_template(template)
-        retriever = self._get_retriever()
-
-        chain = (
-            {"context": retriever, "question": RunnablePassthrough()}
-            | prompt
-            | self.llm
-            | StrOutputParser()
-        )
-
-        return chain.invoke(question)
+        
+        if use_hybrid:
+            retriever = self._get_hybrid_retriever()
+            # Custom retrieval for hybrid since it doesn't follow LangChain's BaseRetriever exactly
+            docs = retriever.retrieve(question)
+            context = "\n\n".join([d.page_content for d in docs])
+            
+            chain = prompt | self.llm | StrOutputParser()
+            return chain.invoke({"context": context, "question": question})
+        else:
+            if not self.vector_store:
+                raise ValueError("Vector store not initialized.")
+            retriever = self.vector_store.as_retriever(search_kwargs={"k": 5})
+            chain = (
+                {"context": retriever, "question": RunnablePassthrough()}
+                | prompt
+                | self.llm
+                | StrOutputParser()
+            )
+            return chain.invoke(question)
 
     def rerank_and_query(self, question: str, top_n: int = 3) -> str:
         """
